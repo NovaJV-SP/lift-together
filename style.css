@@ -90,6 +90,27 @@ table.score { width: 100%; border-collapse: collapse; font-size: 15px; }
 .today-plan { border-left: 4px solid var(--accent); }
 .today-plan .chips button { padding: 6px 12px; border-radius: 99px; font-size: 14px; }
 .today-plan .chips button.done { border-color: var(--good); color: var(--good); }
+.grid-sets { display: grid; grid-template-columns: 1fr 1fr 1.25fr; gap: 10px; margin-top: 10px; }
+.stepper { display: flex; align-items: stretch; }
+.stepper input { text-align: center; border-radius: 0; padding-left: 4px; padding-right: 4px; min-width: 0; -moz-appearance: textfield; }
+.stepper input::-webkit-outer-spin-button, .stepper input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.stepper button { padding: 0 12px; font-size: 18px; flex: none; }
+.stepper button:first-child { border-radius: 10px 0 0 10px; border-right: none; }
+.stepper button:last-child { border-radius: 0 10px 10px 0; border-left: none; }
+.saved { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.tchip { padding: 6px 12px; border-radius: 99px; font-size: 14px; border-color: var(--gold); }
+.chip .chip-edit { background: none; border: none; padding: 0; color: var(--text); font-size: 15px; }
+.pbar { height: 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 99px; overflow: hidden; margin: 6px 0 4px; }
+.pbar > div { height: 100%; border-radius: 99px; transition: width .4s; }
+.goal { padding: 8px 0; border-bottom: 1px solid var(--line); }
+.goal:last-child { border-bottom: none; }
+.pr-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 15px; }
+.pr-row:last-child { border-bottom: none; }
+.lb-row { display: flex; align-items: center; gap: 8px; padding: 9px 6px; border-bottom: 1px solid var(--line); font-size: 15px; border-radius: 8px; }
+.lb-row:last-child { border-bottom: none; }
+.lb-row.me { background: rgba(79,140,255,.08); }
+.lb-row .rank { width: 30px; text-align: center; flex: none; }
+.lb-row .dot { margin-right: 0; }
 #toast { position: fixed; left: 50%; bottom: calc(90px + env(safe-area-inset-bottom)); transform: translateX(-50%); background: var(--panel2); border: 1px solid var(--accent); padding: 10px 16px; border-radius: 12px; opacity: 0; transition: opacity .25s; pointer-events: none; z-index: 10; max-width: 90vw; text-align: center; }
 #toast.show { opacity: 1; }
 #toast.gold { border-color: var(--gold); }

@@ -44,5 +44,16 @@ You and your friend each open the link and click **Create account**. On a phone,
 ### 5. Lock it down
 Once you've both signed up, go to **Authentication → Sign In / Providers** and turn **off** "Allow new users to sign up". Now nobody else can create an account.
 
+## Database updates
+New features sometimes need new tables or columns. Run each file once, in order, in **Supabase → SQL Editor**:
+1. `supabase/schema.sql`: the starting tables
+2. `supabase/002_schedule.sql`: workout schedules
+3. `supabase/003_goals_prs_templates.sql`: goals, hand-entered PRs, saved workouts/exercises
+
+Files 002 and 003 are safe to run again if you're not sure whether you already did.
+
+## Demo mode
+Add `?demo` to the address (e.g. `…/lift-together/?demo`) to try the app with sample data. Nothing is saved to the real database.
+
 ## Updating the app later
 Change the files, commit, and push. GitHub Pages republishes automatically within about a minute.
