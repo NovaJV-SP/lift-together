@@ -5,7 +5,7 @@
 // the security rules in supabase/schema.sql decide what each signed-in person can do.
 // NEVER put the "service_role" key here.
 window.APP_CONFIG = {
-  SUPABASE_URL: '',
-  SUPABASE_ANON_KEY: '',
+  SUPABASE_URL: 'https://vpwyymhcfzahapmwbffo.supabase.co',
+  SUPABASE_ANON_KEY: 'sb_publishable_bK_I6BLxntsA3yepl4Ghxw_7eKDCuIc', // the "publishable" key (safe to be public)
   UNIT: 'lb', // or 'kg'
 };
