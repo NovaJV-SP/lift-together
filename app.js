@@ -27,7 +27,10 @@ const addDays = (s, n) => { const d = parseD(s); d.setDate(d.getDate() + n); ret
 const daysBetween = (a, b) => Math.round((parseD(b) - parseD(a)) / 864e5);
 const fmtD = s => parseD(s).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
 const weekStart = s => { const d = parseD(s); d.setDate(d.getDate() - (d.getDay() + 6) % 7); return dstr(d); };
-const e1rm = (w, r) => r === 1 ? +w : +w * (1 + r / 30);   // Epley estimated one-rep max
+// Is set a better than set b? Heavier weight wins; same weight → more reps wins. (No guessing formulas.)
+const better = (a, b) => !b || a.weight > b.weight || (a.weight === b.weight && a.reps > b.reps);
+const bestOf = sets => sets.reduce((a, b) => better(b, a) ? b : a, null);
+const setText = s => `${fmtNum(s.weight)} × ${s.reps}`;
 const r1 = v => Math.round(v * 10) / 10;
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const norm = s => String(s).trim().toLowerCase().replace(/\s+/g, ' ');
@@ -160,7 +163,7 @@ const store = DEMO ? demoStore() : supabaseStore();
    STATE
    ===================================================================== */
 const data = { me: null, email: '', profiles: [], workouts: [], sets: [], body: [], goals: [], prs: [], templates: [], missing: [] };
-const ui = { tab: 'log', logDate: today(), histWho: 'all', histLimit: 30, progEx: null, progMetric: 'e1rm', bodyMetric: 'bodyweight', compMetric: 'workouts', h2hEx: null };
+const ui = { tab: 'log', logDate: today(), histWho: 'all', histLimit: 30, progEx: null, progMetric: 'top', improveRange: 30, calMonth: today().slice(0, 7), calDay: today(), bodyMetric: 'bodyweight', compMetric: 'workouts', h2hEx: null };
 let D = {}; // derived data, rebuilt by derive()
 
 function people() { // me first, then everyone else in the order they joined, each with a colour
@@ -173,21 +176,21 @@ const nameOf = p => p.id === data.me.id ? 'You' : p.display_name;
 function derive() {
   const wById = new Map(data.workouts.map(w => [w.id, w]));
   const sets = data.sets.filter(s => wById.has(s.workout_id))
-    .map(s => ({ ...s, weight: +s.weight, reps: +s.reps, date: wById.get(s.workout_id).date, e: e1rm(+s.weight, +s.reps) }));
-  const manual = data.prs.map(p => ({ ...p, weight: +p.weight, reps: +p.reps, e: e1rm(+p.weight, +p.reps), manual: true }));
+    .map(s => ({ ...s, weight: +s.weight, reps: +s.reps, date: wById.get(s.workout_id).date }));
+  const manual = data.prs.map(p => ({ ...p, weight: +p.weight, reps: +p.reps, manual: true }));
   const events = [...sets, ...manual].sort((a, b) => a.date.localeCompare(b.date) || String(a.created_at).localeCompare(String(b.created_at)));
-  const best = {}, bestSet = {};
-  for (const ev of events) {   // a PR = beating your previous best estimated 1RM (logged or entered by hand)
+  const best = {}; // "userId|exercise" → your best set so far (logged or entered by hand)
+  for (const ev of events) {   // a PR = heavier than ever, or the same top weight for more reps
     const k = ev.user_id + '|' + norm(ev.exercise);
-    if (!ev.manual) ev.isPR = best[k] !== undefined && ev.e > best[k] + 0.01;
-    if (best[k] === undefined || ev.e > best[k]) { best[k] = ev.e; bestSet[k] = ev; }
+    if (!ev.manual) ev.isPR = !!best[k] && better(ev, best[k]);
+    if (better(ev, best[k])) best[k] = ev;
   }
   const loggedSets = events.filter(e => !e.manual);
   const names = new Map();
   events.forEach(s => { if (!names.has(norm(s.exercise))) names.set(norm(s.exercise), s.exercise); });
   const setsByWorkout = new Map();
   loggedSets.forEach(s => { if (!setsByWorkout.has(s.workout_id)) setsByWorkout.set(s.workout_id, []); setsByWorkout.get(s.workout_id).push(s); });
-  D = { wById, sets: loggedSets, events, best, bestSet, exercises: [...names.values()].sort((a, b) => a.localeCompare(b)), setsByWorkout };
+  D = { wById, sets: loggedSets, events, best, exercises: [...names.values()].sort((a, b) => a.localeCompare(b)), setsByWorkout };
 }
 function canonicalExercise(name) { // reuse an existing spelling so "bench press" and "Bench Press" are the same
   const n = norm(name);
@@ -318,8 +321,11 @@ function renderLog(v) {
       </div>`).join('')}
     ${w ? `
       <div class="card">
-        <label for="wNotes">Notes</label>
-        <textarea id="wNotes" rows="2" placeholder="How did it feel?">${esc(w.notes || '')}</textarea>
+        <h3>Notes</h3>
+        <label for="wBetter">✅ Anything went better?</label>
+        <textarea id="wBetter" class="note-box" rows="2" placeholder="Anything went better?">${esc(unpackNotes(w.notes).better)}</textarea>
+        <label for="wOff" style="margin-top:10px">⚠️ Anything off?</label>
+        <textarea id="wOff" class="note-box" rows="2" placeholder="Anything off?">${esc(unpackNotes(w.notes).off)}</textarea>
         <div class="row" style="margin-top:10px;justify-content:space-between">
           ${groups.length ? '<button class="small" id="saveWorkout">⭐ Save whole workout</button>' : '<span></span>'}
           <button class="small danger" id="delWorkout">Delete this workout</button>
@@ -355,7 +361,10 @@ function renderLog(v) {
     data.sets = data.sets.filter(s => s.id !== b.dataset.delSet); derive(); render();
   }));
   if (w) {
-    $('#wNotes').onchange = e => safely(async () => { const r = await store.update('workouts', w.id, { notes: e.target.value }); Object.assign(w, r); toast('Notes saved.'); });
+    $$('.note-box').forEach(t => t.onchange = () => safely(async () => {
+      const r = await store.update('workouts', w.id, { notes: packNotes($('#wBetter').value, $('#wOff').value) });
+      Object.assign(w, r); toast('Notes saved.');
+    }));
     const sw = $('#saveWorkout');
     if (sw) sw.onclick = () => safely(() => { const pl = planFor(data.me, ui.logDate); return saveTemplate('workout', groups, pl ? pl.name : 'My workout'); });
     $('#delWorkout').onclick = () => safely(async () => {
@@ -364,6 +373,19 @@ function renderLog(v) {
       data.workouts = data.workouts.filter(x => x.id !== w.id); data.sets = data.sets.filter(s => s.workout_id !== w.id); derive(); render();
     });
   }
+}
+/* Both note answers live in the workout's one "notes" field, as two labelled lines. */
+function packNotes(better, off) {
+  return [better.trim() && 'Went better: ' + better.trim().replace(/\n+/g, ' '), off.trim() && 'Off: ' + off.trim().replace(/\n+/g, ' ')].filter(Boolean).join('\n');
+}
+function unpackNotes(notes) {
+  const txt = String(notes || ''), out = { better: '', off: '' };
+  if (!/^(Went better|Off):/m.test(txt)) { out.better = txt.trim(); return out; } // older free-form notes
+  for (const line of txt.split('\n')) {
+    if (line.startsWith('Went better:')) out.better = line.slice(12).trim();
+    else if (line.startsWith('Off:')) out.off = line.slice(4).trim();
+  }
+  return out;
 }
 function planCard(groups) { // "Today: Push" with tap-to-fill exercise suggestions
   const plan = planFor(data.me, ui.logDate);
@@ -385,7 +407,7 @@ function exerciseHint(name) {
   if (!name.trim()) return '';
   const n = norm(name), lines = [];
   for (const p of people()) {
-    const top = D.bestSet[p.id + '|' + n];
+    const top = D.best[p.id + '|' + n];
     if (!top) continue;
     if (p.id === data.me.id) {
       const mine = D.sets.filter(s => s.user_id === p.id && norm(s.exercise) === n && s.date !== ui.logDate);
@@ -393,8 +415,8 @@ function exerciseHint(name) {
         const lastDate = mine[mine.length - 1].date, lastSets = mine.filter(s => s.date === lastDate);
         lines.push(`<b>Last time</b> (${fmtD(lastDate)}): ${lastSets.map(s => `${fmtNum(s.weight)}×${s.reps}`).join(', ')}`);
       }
-      lines.push(`<b>Your PR:</b> ${fmtNum(top.weight)}×${top.reps} (est. 1-rep max ${Math.round(top.e)} ${UNIT}). Beat it for a 🏆`);
-    } else if (lines.length < 6) lines.push(`<span class="dot" style="background:${p.color}"></span><b>${esc(p.display_name)}'s PR:</b> ${fmtNum(top.weight)}×${top.reps} (est. ${Math.round(top.e)} ${UNIT})`);
+      lines.push(`<b>Your PR:</b> ${setText(top)} ${UNIT}. Go heavier, or do more reps at ${fmtNum(top.weight)}, for a 🏆`);
+    } else if (lines.length < 6) lines.push(`<span class="dot" style="background:${p.color}"></span><b>${esc(p.display_name)}'s PR:</b> ${setText(top)} ${UNIT}`);
   }
   return lines.join('<br>');
 }
@@ -487,38 +509,71 @@ function workoutSummary(w) {
   const groups = groupByExercise(D.setsByWorkout.get(w.id) || []);
   if (!groups.length) return '<ul><li>No sets</li></ul>';
   return '<ul>' + groups.map(g => {
-    const top = g.sets.reduce((a, b) => b.e > a.e ? b : a);
+    const top = bestOf(g.sets);
     return `<li>${esc(g.name)}: ${plural(g.sets.length, 'set')}, top ${fmtNum(top.weight)}×${top.reps}${g.sets.some(s => s.isPR) ? ' 🏆' : ''}</li>`;
   }).join('') + '</ul>';
 }
+function notesHtml(notes) {
+  const n = unpackNotes(notes);
+  return (n.better ? `<div class="muted small" style="margin-top:6px">✅ <b>Went better:</b> ${esc(n.better)}</div>` : '')
+       + (n.off ? `<div class="muted small" style="margin-top:4px">⚠️ <b>Off:</b> ${esc(n.off)}</div>` : '');
+}
 function renderHistory(v) {
-  const list = data.workouts.filter(w => ui.histWho === 'all' || w.user_id === ui.histWho)
-    .sort((a, b) => b.date.localeCompare(a.date) || String(b.created_at).localeCompare(String(a.created_at)));
+  const list = data.workouts.filter(w => ui.histWho === 'all' || w.user_id === ui.histWho);
+  const byDate = new Map();
+  list.forEach(w => { if (!byDate.has(w.date)) byDate.set(w.date, []); byDate.get(w.date).push(w); });
+  // month grid, Monday first
+  const [y, mo] = ui.calMonth.split('-').map(Number);
+  const first = new Date(y, mo - 1, 1), daysInMonth = new Date(y, mo, 0).getDate(), lead = (first.getDay() + 6) % 7;
+  const cells = [];
+  for (let i = 0; i < lead; i++) cells.push('<div></div>');
+  let monthCount = 0;
+  for (let d = 1; d <= daysInMonth; d++) {
+    const ds = `${y}-${z(mo)}-${z(d)}`, ws = byDate.get(ds) || [];
+    monthCount += ws.length;
+    const dots = [...new Set(ws.map(w => w.user_id))].map(uid => `<span class="dot" style="background:${person(uid).color}"></span>`).join('');
+    cells.push(`<button class="cal-day ${ds === ui.calDay ? 'sel' : ''} ${ds === today() ? 'today' : ''} ${ws.length ? 'has' : ''}" data-day="${ds}" ${ds > today() ? 'disabled' : ''}>
+      <span>${d}</span><span class="cal-dots">${dots}</span></button>`);
+  }
+  const monthName = first.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+  const dayList = (byDate.get(ui.calDay) || []).sort((a, b) => (a.user_id === data.me.id ? -1 : b.user_id === data.me.id ? 1 : 0));
   v.innerHTML = `
     <div class="card">${whoPicker('histWho', ui.histWho)}</div>
-    ${list.slice(0, ui.histLimit).map(w => {
+    <div class="card">
+      <div class="row" style="justify-content:space-between;margin-bottom:10px">
+        <button class="small" id="calPrev" aria-label="Previous month">‹</button>
+        <div class="center"><b>${monthName}</b><div class="muted small">${plural(monthCount, 'workout')}</div></div>
+        <button class="small" id="calNext" aria-label="Next month" ${ui.calMonth >= today().slice(0, 7) ? 'disabled' : ''}>›</button>
+      </div>
+      <div class="cal">${['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su'].map(d => `<div class="cal-head">${d}</div>`).join('')}${cells.join('')}</div>
+      ${people().length > 1 ? `<div class="row small muted" style="margin-top:10px;gap:12px">${people().map(p => `<span><span class="dot" style="background:${p.color}"></span>${esc(nameOf(p))}</span>`).join('')}</div>` : ''}
+    </div>
+    <h3 style="margin:4px 2px 10px">${fmtD(ui.calDay)}</h3>
+    ${dayList.map(w => {
       const p = person(w.user_id), mine = w.user_id === data.me.id;
       return `<div class="card wcard" style="border-left-color:${p.color}">
         <div class="row" style="justify-content:space-between">
-          <div><b>${esc(mine ? 'You' : p.display_name)}</b> <span class="muted">· ${fmtD(w.date)}</span></div>
+          <b>${esc(mine ? 'You' : p.display_name)}</b>
           ${mine ? `<button class="small" data-edit="${w.date}">Edit</button>` : ''}
         </div>
         ${workoutSummary(w)}
-        ${w.notes ? `<div class="muted small" style="margin-top:6px">📝 ${esc(w.notes)}</div>` : ''}
+        ${notesHtml(w.notes)}
       </div>`;
-    }).join('') || '<p class="muted center">No workouts yet.</p>'}
-    ${list.length > ui.histLimit ? '<button id="more" style="width:100%">Show more</button>' : ''}`;
-  bindWhoPicker('histWho', v2 => { ui.histWho = v2; ui.histLimit = 30; render(); });
+    }).join('') || '<p class="muted center">No workouts on this day. Tap a day with dots.</p>'}`;
+  bindWhoPicker('histWho', v2 => { ui.histWho = v2; render(); });
+  const shift = n => { const d = new Date(y, mo - 1 + n, 1); ui.calMonth = `${d.getFullYear()}-${z(d.getMonth() + 1)}`; render(); };
+  $('#calPrev').onclick = () => shift(-1);
+  $('#calNext').onclick = () => shift(1);
+  $$('.cal-day').forEach(b => b.onclick = () => { ui.calDay = b.dataset.day; render(); });
   $$('[data-edit]').forEach(b => b.onclick = () => { ui.logDate = b.dataset.edit; ui.tab = 'log'; render(); window.scrollTo(0, 0); });
-  const m = $('#more'); if (m) m.onclick = () => { ui.histLimit += 30; render(); };
 }
 
 /* =====================================================================
    PROGRESS: goals, PRs, and charts
    ===================================================================== */
 const METRICS = {
-  e1rm: { label: `Est. 1-rep max (${UNIT})`, agg: ss => Math.max(...ss.map(s => s.e)) },
   top: { label: `Heaviest weight (${UNIT})`, agg: ss => Math.max(...ss.map(s => s.weight)) },
+  reps: { label: 'Total reps', agg: ss => ss.reduce((a, s) => a + s.reps, 0) },
   volume: { label: `Volume (${UNIT} × reps)`, agg: ss => ss.reduce((a, s) => a + s.weight * s.reps, 0) },
 };
 function latestBodyweight(uid) {
@@ -536,12 +591,14 @@ function goalInfo(g) { // → { title, pct, done, detail }
     const done = tw < start ? cur <= tw : cur >= tw;
     return { title, pct: done ? 1 : clamp(pct, 0, 1), done, detail: `Now ${fmtNum(cur)} ${UNIT} · started at ${fmtNum(start)}` };
   }
-  const k = g.user_id + '|' + norm(g.exercise), best = D.best[k] || 0, target = e1rm(tw, tr);
-  const done = D.events.some(e => e.user_id === g.user_id && norm(e.exercise) === norm(g.exercise) && e.weight >= tw && e.reps >= tr);
-  const top = D.bestSet[k];
+  // progress = heaviest weight you've lifted for at least the goal's reps, out of the goal weight
+  const mine = D.events.filter(e => e.user_id === g.user_id && norm(e.exercise) === norm(g.exercise));
+  const done = mine.some(e => e.weight >= tw && e.reps >= tr);
+  const qualifying = mine.filter(e => e.reps >= tr), heaviest = qualifying.length ? Math.max(...qualifying.map(e => e.weight)) : 0;
   return {
-    title: `${g.exercise}: ${fmtNum(tw)} ${UNIT} × ${tr}`, done, pct: done ? 1 : clamp(best / target, 0, 1),
-    detail: top ? `Best so far ${fmtNum(top.weight)}×${top.reps} (est. ${Math.round(best)} of ${Math.round(target)})` : 'No sets logged for this yet.',
+    title: `${g.exercise}: ${fmtNum(tw)} ${UNIT} × ${tr}`, done, pct: done ? 1 : clamp(heaviest / tw, 0, 1),
+    detail: !mine.length ? 'No sets logged for this yet.'
+      : qualifying.length ? `Heaviest for ${plural(tr, 'rep')}+: ${fmtNum(heaviest)} ${UNIT}` : `No set of ${tr}+ reps yet`,
   };
 }
 function deadlineText(g) {
@@ -578,7 +635,7 @@ function lineChart(canvas, series, yLabel) {
 function renderProgress(v) {
   const me = people()[0];
   const myGoals = data.goals.filter(g => g.user_id === me.id).sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
-  const myPRs = D.exercises.map(ex => D.bestSet[me.id + '|' + norm(ex)]).filter(Boolean).sort((a, b) => a.exercise.localeCompare(b.exercise));
+  const myPRs = D.exercises.map(ex => D.best[me.id + '|' + norm(ex)]).filter(Boolean).sort((a, b) => a.exercise.localeCompare(b.exercise));
   let html = `
     <div class="card">
       <div class="row" style="justify-content:space-between;margin-bottom:8px"><h2 style="margin:0">🎯 My goals</h2><button class="small" id="addGoal">+ New goal</button></div>
@@ -588,10 +645,11 @@ function renderProgress(v) {
       <div class="row" style="justify-content:space-between;margin-bottom:8px"><h2 style="margin:0">🏆 My PRs</h2><button class="small" id="addPR">+ Add a PR</button></div>
       ${myPRs.length ? myPRs.map(p => `<div class="pr-row">
           <span class="grow"><b>${esc(p.exercise)}</b> <span class="muted small">· ${fmtD(p.date)}${p.manual ? ' · entered by hand' : ''}</span></span>
-          <span>${fmtNum(p.weight)} × ${p.reps} <span class="muted small">(est. ${Math.round(p.e)})</span></span>
+          <span>${setText(p)} <span class="muted small">${UNIT}</span></span>
           ${p.manual ? `<button class="link" data-del-pr="${p.id}" title="Delete">×</button>` : ''}
         </div>`).join('') : '<p class="muted small" style="margin:0">Your best lift per exercise shows up here automatically. Add PRs from before you used the app with <b>+ Add a PR</b>.</p>'}
     </div>`;
+  html += improvedCard(me);
   if (D.exercises.length) {
     if (!ui.progEx || !D.exercises.includes(ui.progEx)) {
       const mine = D.sets.filter(s => s.user_id === me.id);
@@ -613,18 +671,19 @@ function renderProgress(v) {
         ${series.length ? '<div class="chart-box" style="margin-top:12px"><canvas id="progChart"></canvas></div>' : '<p class="muted center">No logged sets for this exercise yet.</p>'}
       </div>
       ${series.map(s => {
-        const all = s.points.flatMap(p => p.sets), top = all.reduce((a, b) => b.e > a.e ? b : a);
+        const all = s.points.flatMap(p => p.sets), top = bestOf(all);
         const diff = s.points[s.points.length - 1].y - s.points[0].y, prs = all.filter(x => x.isPR).length;
         return `<div class="card wcard" style="border-left-color:${s.color}">
           <b>${esc(s.label)}</b>
           <div class="muted small" style="margin-top:4px">
-            Best set: <b style="color:var(--text)">${fmtNum(top.weight)} × ${top.reps}</b> (est. 1-rep max ${Math.round(top.e)} ${UNIT})<br>
+            Best set: <b style="color:var(--text)">${setText(top)} ${UNIT}</b><br>
             ${plural(s.points.length, 'session')} · ${plural(prs, 'PR')} ·
             ${s.points.length > 1 ? `<span style="color:${diff >= 0 ? 'var(--good)' : 'var(--bad)'}">${diff >= 0 ? '▲' : '▼'} ${fmtNum(Math.abs(diff))}</span> since ${fmtD(s.points[0].date)}` : 'first session'}
           </div></div>`;
       }).join('')}`;
   }
   v.innerHTML = html;
+  $$('#improveRange button').forEach(b => b.onclick = () => { ui.improveRange = +b.dataset.r; render(); });
   $('#addGoal').onclick = openGoalForm;
   $('#addPR').onclick = openPRForm;
   $$('[data-del-goal]').forEach(b => b.onclick = () => safely(async () => {
@@ -640,6 +699,56 @@ function renderProgress(v) {
     $('#progMetric').onchange = e => { ui.progMetric = e.target.value; render(); };
     if (series.length) lineChart($('#progChart'), series, METRICS[ui.progMetric].label);
   }
+}
+/* ---------- 📈 most improved: which body areas are getting stronger fastest ---------- */
+function muscleOf(ex) {
+  const n = norm(ex);
+  for (const [m, list] of Object.entries(MUSCLE_EX)) if (list.some(e => norm(e) === n)) return m;
+  const rules = [[/deadlift|row|pull|lat|chin/, 'Back'], [/curl/, 'Biceps'], [/tricep|extension|skull|dip/, 'Triceps'],
+    [/squat|lunge|leg|calf|step/, 'Legs'], [/glute|hip|thrust/, 'Glutes'], [/bench|chest|fly|push-?up|pec/, 'Chest'],
+    [/shoulder|raise|overhead|military|arnold|press/, 'Shoulders'], [/ab|core|plank|crunch|sit-?up/, 'Core']];
+  for (const [re, m] of rules) if (re.test(n)) return m;
+  return 'Other';
+}
+function improvements(uid, days) {
+  // per exercise: heaviest weight on the first day in the range vs. the best weight on any later day
+  const since = days ? addDays(today(), -days) : '0000-00-00';
+  const byEx = new Map();
+  D.sets.filter(s => s.user_id === uid && s.date >= since).forEach(s => {
+    const k = norm(s.exercise);
+    if (!byEx.has(k)) byEx.set(k, { name: s.exercise, byDate: new Map() });
+    const e = byEx.get(k); if (!e.byDate.has(s.date)) e.byDate.set(s.date, []); e.byDate.get(s.date).push(s);
+  });
+  const out = [];
+  for (const e of byEx.values()) {
+    const dates = [...e.byDate.keys()].sort();
+    if (dates.length < 2) continue;
+    const from = Math.max(...e.byDate.get(dates[0]).map(s => s.weight));
+    const to = Math.max(...dates.slice(1).flatMap(d => e.byDate.get(d).map(s => s.weight)));
+    if (from > 0) out.push({ name: e.name, muscle: muscleOf(e.name), from, to, pct: (to - from) / from * 100 });
+  }
+  return out;
+}
+function improvedCard(me) {
+  const items = improvements(me.id, ui.improveRange);
+  const areas = new Map();
+  items.forEach(i => { if (!areas.has(i.muscle)) areas.set(i.muscle, []); areas.get(i.muscle).push(i); });
+  const ranked = [...areas].map(([m, list]) => ({ m, list: list.sort((a, b) => b.pct - a.pct), avg: list.reduce((a, i) => a + i.pct, 0) / list.length }))
+    .sort((a, b) => b.avg - a.avg);
+  const top = Math.max(1, ...ranked.map(r => r.avg));
+  const ranges = [[30, '30 days'], [90, '90 days'], [0, 'All time']];
+  const sign = p => `${p >= 0 ? '+' : ''}${Math.round(p)}%`;
+  return `<div class="card">
+    <h2>🔥 Most improved</h2>
+    <div class="seg" id="improveRange" style="margin-bottom:12px">${ranges.map(([r, l]) => `<button data-r="${r}" class="${ui.improveRange === r ? 'on' : ''}">${l}</button>`).join('')}</div>
+    ${!ranked.length ? '<p class="muted small" style="margin:0">Log the same exercise on at least two different days in this time range to see which areas are getting stronger.</p>' : `
+      <div class="improve-top">🏅 <b>${esc(ranked[0].m)}</b> is your most improved area: <b style="color:${ranked[0].avg >= 0 ? 'var(--good)' : 'var(--bad)'}">${sign(ranked[0].avg)}</b> average</div>
+      ${ranked.map((r, i) => `<div class="goal">
+        <div class="row" style="justify-content:space-between"><b>${i + 1}. ${esc(r.m)}</b><b style="color:${r.avg >= 0 ? 'var(--good)' : 'var(--bad)'}">${sign(r.avg)}</b></div>
+        ${bar(r.avg / top, r.avg >= 0 ? 'var(--good)' : 'var(--bad)')}
+        <div class="muted small">${r.list.map(x => `${esc(x.name)}: ${fmtNum(x.from)} → ${fmtNum(x.to)} ${UNIT} (${sign(x.pct)})`).join('<br>')}</div>
+      </div>`).join('')}`}
+  </div>`;
 }
 const exDatalist = id => `<datalist id="${id}">${[...new Set([...D.exercises, ...COMMON_EXERCISES])].map(n => `<option value="${esc(n)}">`).join('')}</datalist>`;
 function openGoalForm() {
@@ -772,7 +881,7 @@ function leaderboard(entries, fmt = fmtNum) { // entries: [{ p, val }] → ranke
     if (e.val !== prev) { rank = i + 1; prev = e.val; }
     const medal = e.val > 0 ? (['🥇', '🥈', '🥉'][rank - 1] || `#${rank}`) : '–';
     return `<div class="lb-row ${e.p.id === data.me.id ? 'me' : ''}"><span class="rank">${medal}</span>
-      <span class="dot" style="background:${e.p.color}"></span><span class="grow">${esc(nameOf(e.p))}</span><b>${fmt(e.val)}</b></div>`;
+      <span class="dot" style="background:${e.p.color}"></span><span class="grow">${esc(nameOf(e.p))}</span><b>${fmt(e.val, e)}</b></div>`;
   }).join('');
 }
 const COMPETE_METRICS = [
@@ -818,8 +927,8 @@ function renderCompete(v) {
     </div>
     <div class="card"><h2>💪 Strongest lift</h2>
       ${shared.length ? `<select id="h2hEx" style="margin-bottom:10px">${shared.map(ex => `<option ${ex === ui.h2hEx ? 'selected' : ''}>${esc(ex)}</option>`).join('')}</select>
-        <p class="muted small" style="margin:-4px 0 6px">Best estimated 1-rep max (${UNIT})</p>
-        ${leaderboard(ps.filter(p => D.best[p.id + '|' + norm(ui.h2hEx)] !== undefined).map(p => ({ p, val: Math.round(D.best[p.id + '|' + norm(ui.h2hEx)]) })))}`
+        <p class="muted small" style="margin:-4px 0 6px">Each person's best set (${UNIT}). Heaviest wins; on a tie, more reps wins.</p>
+        ${leaderboard(ps.filter(p => D.best[p.id + '|' + norm(ui.h2hEx)]).map(p => { const b = D.best[p.id + '|' + norm(ui.h2hEx)]; return { p, val: b.weight + b.reps / 1000, text: setText(b) }; }), (v2, e) => e.text)}`
         : '<p class="muted">Once two people have logged the same exercise, you can compare it here.</p>'}
     </div>
     <div class="card"><h2>🎯 Everyone's goals</h2>
@@ -1039,7 +1148,7 @@ function renderAuth(mode = 'in', msg = '') {
   $('#nav').hidden = true; $('#who').innerHTML = ''; closeModal();
   $('#view').innerHTML = `
     <div class="auth">
-      <h1>💪 Lift Together</h1>
+      <h1 class="brand-big">Lift Together</h1>
       <p class="muted center" style="margin-top:0">Track your lifts. Beat your friends.</p>
       <form class="card" id="authForm" autocomplete="on">
         <div class="seg"><button type="button" data-m="in" class="${mode === 'in' ? 'on' : ''}">Sign in</button><button type="button" data-m="up" class="${mode === 'up' ? 'on' : ''}">Create account</button></div>
