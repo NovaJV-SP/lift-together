@@ -49,6 +49,11 @@ create index if not exists workouts_user_date on public.workouts (user_id, date)
 create index if not exists sets_workout on public.sets (workout_id);
 create index if not exists body_user_date on public.body_stats (user_id, date);
 
+-- Let signed-in users reach these tables through the API at all.
+-- (The rules below then decide exactly which rows each person may touch.)
+grant usage on schema public to authenticated;
+grant select, insert, update, delete on public.profiles, public.workouts, public.sets, public.body_stats to authenticated;
+
 -- Security rules -------------------------------------------------------------
 alter table public.profiles   enable row level security;
 alter table public.workouts   enable row level security;
