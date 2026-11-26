@@ -5,7 +5,8 @@
    ===================================================================== */
 
 const cfg = window.APP_CONFIG || {};
-const DEMO = !(cfg.SUPABASE_URL && cfg.SUPABASE_ANON_KEY);
+// Demo mode: no database configured, or "?demo" added to the address (handy for showing people the app)
+const DEMO = new URLSearchParams(location.search).has('demo') || !(cfg.SUPABASE_URL && cfg.SUPABASE_ANON_KEY);
 const UNIT = cfg.UNIT || 'lb';
 const STREAK_MIN = 2; // workouts per week that keep a streak alive
 const COLORS = ['var(--p0)', 'var(--p1)', 'var(--p2)'];
@@ -40,7 +41,13 @@ async function safely(fn) { try { return await fn(); } catch (e) { console.error
 const TABLE_KEY = { profiles: 'profiles', workouts: 'workouts', sets: 'sets', body_stats: 'body' };
 
 function supabaseStore() {
-  const sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
+  // persistSession: stay signed in on this device until you press "Sign out"
+  const sb = window.supabase.createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY, {
+    auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
+  });
+  sb.auth.onAuthStateChange(event => { // e.g. the session expired or was revoked elsewhere
+    if (event === 'SIGNED_OUT' && data.me) { data.me = null; renderAuth('in', '<p class="muted">You were signed out. Sign in again below.</p>'); }
+  });
   async function all(table) { // Supabase returns max 1000 rows per request, so page through
     let out = [];
     for (let from = 0; ; from += 1000) {
@@ -59,7 +66,8 @@ function supabaseStore() {
       if (error) throw error;
       return data.session ? data.user : null; // null → they must confirm their email first
     },
-    async signOut() { await sb.auth.signOut(); location.reload(); },
+    // scope 'local' = sign out on THIS device only (the default signed you out everywhere)
+    async signOut() { await sb.auth.signOut({ scope: 'local' }); location.reload(); },
     async loadAll() {
       const [profiles, workouts, sets, body] = await Promise.all(['profiles', 'workouts', 'sets', 'body_stats'].map(all));
       return { profiles, workouts, sets, body };
@@ -178,20 +186,49 @@ async function reload() {
    ===================================================================== */
 let chart = null;
 function render() {
+  if (!data.me) return renderAuth(); // never show app pages to someone who isn't signed in
   if (chart) { chart.destroy(); chart = null; }
   $$('#nav button').forEach(b => b.classList.toggle('active', b.dataset.tab === ui.tab));
   const v = $('#view');
-  ({ log: renderLog, history: renderHistory, progress: renderProgress, body: renderBody, compete: renderCompete })[ui.tab](v);
+  try {
+    ({ log: renderLog, history: renderHistory, progress: renderProgress, body: renderBody, compete: renderCompete })[ui.tab](v);
+  } catch (e) { // show the problem instead of silently leaving the old page up
+    console.error(e);
+    v.innerHTML = `<div class="card"><b>⚠ This page hit a problem.</b><p class="muted">${esc(e.message || e)}</p><button id="retry">Try again</button></div>`;
+    $('#retry').onclick = () => safely(async () => { await reload(); render(); });
+  }
 }
 function renderHeader() {
   const me = people()[0];
-  $('#who').innerHTML = `<span><span class="dot" style="background:${me.color}"></span>${esc(me.display_name)}</span>
+  $('#who').innerHTML = `
     <button class="small" id="refreshBtn" title="Get the latest from your friends">⟳</button>
-    <button class="small" id="outBtn">${DEMO ? 'Reset demo' : 'Sign out'}</button>`;
-  $('#refreshBtn').onclick = () => safely(async () => { await reload(); render(); toast('Up to date.'); });
-  $('#outBtn').onclick = () => store.signOut();
+    <button class="small acct" id="acctBtn" aria-haspopup="true"><span class="dot" style="background:${me.color}"></span><span class="acct-name">${esc(me.display_name)}</span> ▾</button>
+    <div class="menu" id="acctMenu" hidden>
+      <div class="menu-head"><b>${esc(me.display_name)}</b><span class="muted small">${esc(data.email || '')}</span></div>
+      <button data-act="name">✏️ Change my name</button>
+      <button data-act="schedule">📅 My workout schedule</button>
+      <button data-act="out" class="danger">${DEMO ? '↺ Reset demo data' : '🚪 Sign out'}</button>
+      ${DEMO ? '' : '<p class="muted small" style="margin:6px 10px 2px">To use a different account, sign out, then sign in with the other one.</p>'}
+    </div>`;
+  const menu = $('#acctMenu');
+  $('#refreshBtn').onclick = () => safely(async () => { await reload(); renderHeader(); render(); toast('Up to date.'); });
+  $('#acctBtn').onclick = e => { e.stopPropagation(); menu.hidden = !menu.hidden; };
+  menu.onclick = e => e.stopPropagation();
+  $$('#acctMenu [data-act]').forEach(b => b.onclick = () => {
+    menu.hidden = true;
+    if (b.dataset.act === 'out') return store.signOut();
+    if (b.dataset.act === 'schedule') return openSchedule(data.me.schedule ? 'week' : 'plan');
+    if (b.dataset.act === 'name') return safely(async () => {
+      const name = (prompt('What name should your friends see?', data.me.display_name) || '').trim();
+      if (!name || name === data.me.display_name) return;
+      const r = await store.update('profiles', data.me.id, { display_name: name.slice(0, 40) });
+      Object.assign(data.me, r); Object.assign(data.profiles.find(p => p.id === data.me.id) || {}, r);
+      renderHeader(); render(); toast('Name updated.');
+    });
+  });
 }
-$$('#nav button').forEach(b => b.onclick = () => { ui.tab = b.dataset.tab; render(); window.scrollTo(0, 0); });
+document.addEventListener('click', () => { const m = $('#acctMenu'); if (m) m.hidden = true; });
+$$('#nav button').forEach(b => b.onclick = () => { if (!data.me) return; ui.tab = b.dataset.tab; render(); window.scrollTo(0, 0); });
 
 /* =====================================================================
    LOG: today's workout, set by set
@@ -215,6 +252,7 @@ function renderLog(v) {
         ${ui.logDate !== today() ? '<button id="toToday" style="align-self:flex-end">Today</button>' : ''}
       </div>
     </div>
+    ${planCard(groups)}
     <div class="card">
       <h2>Add a set</h2>
       <datalist id="exList">${allNames.map(n => `<option value="${esc(n)}">`).join('')}</datalist>
@@ -238,6 +276,13 @@ function renderLog(v) {
         <div class="row" style="margin-top:10px;justify-content:flex-end"><button class="small danger" id="delWorkout">Delete this workout</button></div>
       </div>` : `<p class="muted center">No sets logged for ${ui.logDate === today() ? 'today' : fmtD(ui.logDate)} yet.</p>`}`;
 
+  $$('[data-suggest]').forEach(b => b.onclick = () => {
+    $('#exName').value = b.dataset.suggest; $('#exWeight').value = ''; $('#exReps').value = '';
+    const prev = D.sets.filter(s => s.user_id === data.me.id && norm(s.exercise) === norm(b.dataset.suggest)).pop();
+    if (prev) { $('#exWeight').value = prev.weight; $('#exReps').value = prev.reps; } // start from last time
+    $('#exHint').innerHTML = exerciseHint(b.dataset.suggest); $('#exWeight').focus();
+  });
+  const ps = $('#planSetup'); if (ps) ps.onclick = () => openSchedule(data.me.schedule ? 'week' : 'welcome');
   $('#logDate').onchange = e => { ui.logDate = e.target.value || today(); render(); };
   const tt = $('#toToday'); if (tt) tt.onclick = () => { ui.logDate = today(); render(); };
   const updateHint = () => { $('#exHint').innerHTML = exerciseHint($('#exName').value); };
@@ -256,6 +301,21 @@ function renderLog(v) {
       data.workouts = data.workouts.filter(x => x.id !== w.id); data.sets = data.sets.filter(s => s.workout_id !== w.id); derive(); render();
     });
   }
+}
+function planCard(groups) { // "Today's plan: Push" with tap-to-fill exercise suggestions
+  const plan = planFor(data.me, ui.logDate);
+  const when = ui.logDate === today() ? 'Today' : WEEKDAYS[weekdayIndex(ui.logDate)];
+  if (plan === undefined) return `<div class="card today-plan row" style="justify-content:space-between"><span class="muted">📅 No workout schedule yet.</span><button class="small" id="planSetup">Set it up</button></div>`;
+  if (plan === null) return `<div class="card today-plan row" style="justify-content:space-between"><span>😴 <b>${when}: rest day.</b> <span class="muted">Training anyway? Log it below.</span></span><button class="small" id="planSetup">Edit</button></div>`;
+  const doneNames = new Set(groups.map(g => norm(g.name)));
+  return `<div class="card today-plan">
+    <div class="row" style="justify-content:space-between;margin-bottom:6px">
+      <span>📅 <b>${when}: ${esc(plan.name)}</b> <span class="muted small">${esc(plan.muscles.join(' · '))}</span></span>
+      <button class="small" id="planSetup">Edit</button>
+    </div>
+    ${plan.ex.length ? `<div class="muted small" style="margin-bottom:6px">Tap an exercise to start logging it:</div>
+    <div class="chips">${plan.ex.map(e => `<button data-suggest="${esc(e)}" class="${doneNames.has(norm(e)) ? 'done' : ''}">${doneNames.has(norm(e)) ? '✓ ' : ''}${esc(e)}</button>`).join('')}</div>` : ''}
+  </div>`;
 }
 function exerciseHint(name) {
   if (!name.trim()) return '';
@@ -476,6 +536,9 @@ function renderCompete(v) {
   const head = `<tr><th></th>${ps.map(p => `<th><span class="dot" style="background:${p.color}"></span>${esc(p.id === data.me.id ? 'You' : p.display_name)}</th>`).join('')}</tr>`;
   const shared = D.exercises.filter(ex => ps.every(p => D.best[p.id + '|' + norm(ex)] !== undefined));
   v.innerHTML = `
+    <div class="card"><h2>Today's plan</h2><table class="score">${head}
+      <tr><td>${WEEKDAYS[weekdayIndex(today())]}</td>${ps.map(p => { const pl = planFor(p, today()); return `<td>${pl === undefined ? '<span class="muted">No schedule</span>' : pl === null ? '😴 Rest' : esc(pl.name)}</td>`; }).join('')}</tr>
+    </table></div>
     <div class="card"><h2>This week</h2><table class="score">${head}
       ${row('Workouts', 'workouts')}${row('Sets', 'sets')}${row(`Volume (${UNIT})`, 'volume', x => Math.round(x).toLocaleString())}
     </table></div>
@@ -495,26 +558,178 @@ function renderCompete(v) {
 }
 
 /* =====================================================================
+   WORKOUT SCHEDULE: pick a plan, then adjust your week
+   Saved on your profile as { plan, days: [Mon..Sun] } where each day is
+   null (rest), { type: 'push' } or { type: 'custom', name, muscles: [...] }
+   ===================================================================== */
+const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+const weekdayIndex = s => (parseD(s).getDay() + 6) % 7; // Monday = 0
+const MUSCLE_EX = {
+  Chest: ['Bench Press', 'Incline Dumbbell Press', 'Chest Fly', 'Dip'],
+  Back: ['Pull-up', 'Barbell Row', 'Lat Pulldown', 'Seated Cable Row'],
+  Shoulders: ['Overhead Press', 'Lateral Raise', 'Face Pull'],
+  Biceps: ['Bicep Curl', 'Hammer Curl'],
+  Triceps: ['Tricep Pushdown', 'Skull Crusher', 'Dip'],
+  Legs: ['Squat', 'Leg Press', 'Romanian Deadlift', 'Leg Curl', 'Calf Raise'],
+  Glutes: ['Hip Thrust', 'Romanian Deadlift'],
+  Core: ['Plank', 'Hanging Leg Raise', 'Cable Crunch'],
+};
+const DAY_TYPES = {
+  push:       { name: 'Push', muscles: ['Chest', 'Shoulders', 'Triceps'], ex: ['Bench Press', 'Overhead Press', 'Incline Dumbbell Press', 'Lateral Raise', 'Tricep Pushdown'] },
+  pull:       { name: 'Pull', muscles: ['Back', 'Biceps'], ex: ['Deadlift', 'Pull-up', 'Barbell Row', 'Lat Pulldown', 'Bicep Curl'] },
+  legs:       { name: 'Legs', muscles: ['Legs', 'Glutes'], ex: ['Squat', 'Romanian Deadlift', 'Leg Press', 'Leg Curl', 'Calf Raise'] },
+  upper:      { name: 'Upper Body', muscles: ['Chest', 'Back', 'Shoulders', 'Arms'], ex: ['Bench Press', 'Barbell Row', 'Overhead Press', 'Pull-up', 'Bicep Curl', 'Tricep Pushdown'] },
+  lower:      { name: 'Lower Body', muscles: ['Legs', 'Glutes'], ex: ['Squat', 'Romanian Deadlift', 'Leg Press', 'Leg Curl', 'Calf Raise'] },
+  chest_tri:  { name: 'Chest & Triceps', muscles: ['Chest', 'Triceps'], ex: ['Bench Press', 'Incline Dumbbell Press', 'Chest Fly', 'Dip', 'Tricep Pushdown'] },
+  back_bi:    { name: 'Back & Biceps', muscles: ['Back', 'Biceps'], ex: ['Deadlift', 'Pull-up', 'Barbell Row', 'Lat Pulldown', 'Bicep Curl', 'Hammer Curl'] },
+  legs_sh:    { name: 'Legs & Shoulders', muscles: ['Legs', 'Shoulders'], ex: ['Squat', 'Leg Press', 'Romanian Deadlift', 'Overhead Press', 'Lateral Raise'] },
+  chest_back: { name: 'Chest & Back', muscles: ['Chest', 'Back'], ex: ['Bench Press', 'Barbell Row', 'Incline Dumbbell Press', 'Pull-up', 'Seated Cable Row'] },
+  arms_sh:    { name: 'Arms & Shoulders', muscles: ['Biceps', 'Triceps', 'Shoulders'], ex: ['Overhead Press', 'Lateral Raise', 'Bicep Curl', 'Tricep Pushdown', 'Hammer Curl', 'Skull Crusher'] },
+  full:       { name: 'Full Body', muscles: ['Chest', 'Back', 'Legs', 'Shoulders'], ex: ['Squat', 'Bench Press', 'Barbell Row', 'Overhead Press', 'Romanian Deadlift'] },
+};
+const PLANS = {
+  ppl:    { name: 'Push / Pull / Legs', blurb: '6 days a week: Push, Pull, Legs, then repeat. Sunday off.', days: ['push', 'pull', 'legs', 'push', 'pull', 'legs', null] },
+  ul:     { name: 'Upper / Lower', blurb: '4 days a week: Upper, Lower, rest, Upper, Lower.', days: ['upper', 'lower', null, 'upper', 'lower', null, null] },
+  split5: { name: '5-Day Split', blurb: 'One or two muscle groups a day, Monday to Friday.', days: ['chest_tri', 'back_bi', 'legs_sh', 'chest_back', 'arms_sh', null, null] },
+  custom: { name: 'Custom', blurb: 'Build your own week, day by day.', days: [null, null, null, null, null, null, null] },
+};
+function dayInfo(d) { // → { name, muscles, ex } or null for a rest day
+  if (!d) return null;
+  if (d.type === 'custom') {
+    const muscles = d.muscles || [];
+    return { name: d.name || 'Workout', muscles, ex: [...new Set(muscles.flatMap(m => MUSCLE_EX[m] || []))].slice(0, 8) };
+  }
+  return DAY_TYPES[d.type] || null;
+}
+function planFor(profile, date) {
+  const s = profile && profile.schedule;
+  if (!s || !Array.isArray(s.days)) return undefined;  // no schedule set up
+  return dayInfo(s.days[weekdayIndex(date)]);          // null = rest day
+}
+const skipKey = () => 'lt-schedule-skipped-' + (data.me && data.me.id);
+function skippedSchedule() { try { return localStorage.getItem(skipKey()) === '1'; } catch (e) { return false; } }
+
+let sched = null; // pop-up state while it's open
+function openSchedule(step) {
+  const cur = data.me.schedule;
+  sched = { step, plan: (cur && cur.plan) || null, days: cur ? JSON.parse(JSON.stringify(cur.days)) : PLANS.custom.days.slice() };
+  renderSchedule();
+}
+function closeSchedule() { sched = null; const m = $('#modal'); if (m) m.remove(); }
+function renderSchedule() {
+  let m = $('#modal');
+  if (!m) { m = document.createElement('div'); m.id = 'modal'; m.className = 'modal-bg'; document.body.appendChild(m); }
+  const me = data.me;
+  let body = '';
+  if (sched.step === 'welcome') {
+    body = `
+      <div class="center" style="font-size:44px">💪</div>
+      <h2 class="center">Welcome, ${esc(me.display_name)}!</h2>
+      <p class="muted center">Let's set up your weekly workout schedule. Each day, Lift Together will show what's planned and suggest exercises, so logging is quicker.</p>
+      <button class="primary" data-go="plan" style="width:100%">Set up my schedule</button>
+      <button class="link" data-skip style="width:100%;margin-top:6px">Skip for now</button>`;
+  } else if (sched.step === 'plan') {
+    body = `
+      <h2>Pick a plan</h2>
+      <p class="muted small" style="margin-top:-6px">You can change any day on the next screen.</p>
+      ${Object.entries(PLANS).map(([k, p]) => `
+        <button class="plan ${sched.plan === k ? 'on' : ''}" data-plan="${k}">
+          <b>${esc(p.name)}</b><span class="muted small">${esc(p.blurb)}</span>
+          ${k === 'custom' ? '' : `<span class="plan-days">${p.days.map((d, i) => `<span>${WEEKDAYS[i].slice(0, 3)} <b>${d ? esc(DAY_TYPES[d].name) : '–'}</b></span>`).join('')}</span>`}
+        </button>`).join('')}
+      <div class="row" style="justify-content:space-between;margin-top:6px">
+        <button class="link" data-skip>${me.schedule ? 'Cancel' : 'Skip for now'}</button>
+        ${me.schedule ? '<button data-go="week">Back to my week</button>' : ''}
+      </div>`;
+  } else {
+    body = `
+      <h2>Your week</h2>
+      <p class="muted small" style="margin-top:-6px">${sched.plan && sched.plan !== 'custom' ? esc(PLANS[sched.plan].name) + '. ' : ''}Change any day, or choose <b>Custom…</b> to name your own.</p>
+      ${sched.days.map((d, i) => {
+        const val = !d ? 'rest' : d.type;
+        return `<div class="dayrow">
+          <div class="row" style="flex-wrap:nowrap">
+            <b style="width:92px;flex:none">${WEEKDAYS[i]}</b>
+            <select data-day="${i}">
+              <option value="rest" ${val === 'rest' ? 'selected' : ''}>😴 Rest</option>
+              ${Object.entries(DAY_TYPES).map(([k, t]) => `<option value="${k}" ${val === k ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
+              <option value="custom" ${val === 'custom' ? 'selected' : ''}>✏️ Custom…</option>
+            </select>
+          </div>
+          ${val === 'custom' ? `
+            <input data-cname="${i}" placeholder="Name this day, e.g. Glutes & Core" value="${esc(d.name || '')}" maxlength="40" style="margin-top:8px">
+            <div class="chips" style="margin-top:8px">${Object.keys(MUSCLE_EX).map(mu => `<button class="tog ${(d.muscles || []).includes(mu) ? 'on' : ''}" data-mus="${i}|${mu}">${mu}</button>`).join('')}</div>` : ''}
+        </div>`;
+      }).join('')}
+      <div class="row" style="justify-content:space-between;margin-top:14px">
+        <button data-go="plan">← Plans</button>
+        <button class="primary" data-save>Save schedule</button>
+      </div>`;
+  }
+  m.innerHTML = `<div class="modal" role="dialog" aria-modal="true">${body}</div>`;
+  m.onclick = e => { if (e.target === m && data.me.schedule) closeSchedule(); };
+  m.querySelectorAll('[data-go]').forEach(b => b.onclick = () => { sched.step = b.dataset.go; renderSchedule(); });
+  m.querySelectorAll('[data-skip]').forEach(b => b.onclick = () => {
+    if (!data.me.schedule) { try { localStorage.setItem(skipKey(), '1'); } catch (e) {} toast('No problem. Set it up any time from the menu under your name.'); }
+    closeSchedule();
+  });
+  m.querySelectorAll('[data-plan]').forEach(b => b.onclick = () => {
+    sched.plan = b.dataset.plan;
+    sched.days = PLANS[sched.plan].days.map(t => t ? { type: t } : null);
+    sched.step = 'week'; renderSchedule();
+  });
+  m.querySelectorAll('[data-day]').forEach(s => s.onchange = () => {
+    const i = +s.dataset.day, v = s.value;
+    sched.days[i] = v === 'rest' ? null : v === 'custom' ? { type: 'custom', name: '', muscles: [] } : { type: v };
+    renderSchedule();
+  });
+  m.querySelectorAll('[data-cname]').forEach(inp => inp.oninput = () => { sched.days[+inp.dataset.cname].name = inp.value; });
+  m.querySelectorAll('[data-mus]').forEach(b => b.onclick = () => {
+    const [i, mu] = b.dataset.mus.split('|'), d = sched.days[+i];
+    d.muscles = d.muscles.includes(mu) ? d.muscles.filter(x => x !== mu) : [...d.muscles, mu];
+    renderSchedule();
+  });
+  const saveBtn = m.querySelector('[data-save]');
+  if (saveBtn) saveBtn.onclick = () => safely(async () => {
+    const bad = sched.days.findIndex(d => d && d.type === 'custom' && !d.name.trim());
+    if (bad >= 0) return toast(`Give ${WEEKDAYS[bad]}'s custom day a name.`);
+    if (!sched.days.some(Boolean)) return toast('Pick at least one workout day.');
+    const schedule = { plan: sched.plan || 'custom', days: sched.days.map(d => d && d.type === 'custom' ? { ...d, name: d.name.trim() } : d) };
+    saveBtn.disabled = true;
+    try {
+      const r = await store.update('profiles', data.me.id, { schedule });
+      Object.assign(data.me, r); Object.assign(data.profiles.find(p => p.id === data.me.id) || {}, r);
+    } catch (e) {
+      saveBtn.disabled = false;
+      if (/schedule/i.test(e.message || '')) throw new Error('The database needs the schedule update first: run supabase/002_schedule.sql in Supabase.');
+      throw e;
+    }
+    closeSchedule(); render(); toast('📅 Schedule saved!');
+  });
+}
+
+/* =====================================================================
    SIGN IN / CREATE ACCOUNT
    ===================================================================== */
 function renderAuth(mode = 'in', msg = '') {
-  $('#nav').hidden = true; $('#who').innerHTML = '';
+  $('#nav').hidden = true; $('#who').innerHTML = ''; closeSchedule();
   $('#view').innerHTML = `
     <div class="auth">
       <h1>💪 Lift Together</h1>
       <p class="muted center" style="margin-top:0">Track your lifts. Beat your friends.</p>
-      <div class="card">
-        <div class="seg"><button data-m="in" class="${mode === 'in' ? 'on' : ''}">Sign in</button><button data-m="up" class="${mode === 'up' ? 'on' : ''}">Create account</button></div>
-        ${mode === 'up' ? '<div><label for="aName">Your name (what your friends see)</label><input id="aName" autocomplete="nickname"></div>' : ''}
-        <div><label for="aEmail">Email</label><input id="aEmail" type="email" autocomplete="email"></div>
-        <div><label for="aPass">Password</label><input id="aPass" type="password" autocomplete="${mode === 'up' ? 'new-password' : 'current-password'}" minlength="6"></div>
-        <button class="primary" id="aGo" style="width:100%">${mode === 'up' ? 'Create account' : 'Sign in'}</button>
+      <form class="card" id="authForm" autocomplete="on">
+        <div class="seg"><button type="button" data-m="in" class="${mode === 'in' ? 'on' : ''}">Sign in</button><button type="button" data-m="up" class="${mode === 'up' ? 'on' : ''}">Create account</button></div>
+        ${mode === 'up' ? '<div><label for="aName">Your name (what your friends see)</label><input id="aName" name="nickname" autocomplete="nickname"></div>' : ''}
+        <div><label for="aEmail">Email</label><input id="aEmail" name="email" type="email" autocomplete="username" required></div>
+        <div><label for="aPass">Password</label><input id="aPass" name="password" type="password" autocomplete="${mode === 'up' ? 'new-password' : 'current-password'}" minlength="6" required></div>
+        <button type="submit" class="primary" id="aGo" style="width:100%">${mode === 'up' ? 'Create account' : 'Sign in'}</button>
+        <p class="muted small center" style="margin:0">You'll stay signed in on this device until you tap <b>Sign out</b>.</p>
         <div id="aMsg">${msg}</div>
-      </div>
+      </form>
     </div>`;
   $$('.auth .seg button').forEach(b => b.onclick = () => renderAuth(b.dataset.m));
-  $('#aPass').onkeydown = e => { if (e.key === 'Enter') $('#aGo').click(); };
-  $('#aGo').onclick = async () => {
+  $('#authForm').onsubmit = async ev => {
+    ev.preventDefault(); // stay on the page (the browser still offers to save the password)
     const email = $('#aEmail').value.trim(), pass = $('#aPass').value, name = mode === 'up' ? $('#aName').value.trim() : '';
     const say = (t, cls = 'err') => { $('#aMsg').innerHTML = `<p class="${cls}">${esc(t)}</p>`; };
     if (mode === 'up' && !name) return say('Enter your name.');
@@ -534,9 +749,12 @@ function renderAuth(mode = 'in', msg = '') {
 async function start(user) {
   $('#view').innerHTML = '<p class="muted center" style="margin-top:40px">Loading your workouts…</p>';
   data.me = await store.ensureProfile(user);
+  data.email = user.email;
   await reload();
+  data.me = data.profiles.find(p => p.id === data.me.id) || data.me;
   $('#nav').hidden = false;
   renderHeader(); render();
+  if (!data.me.schedule && !skippedSchedule()) openSchedule('welcome'); // first sign-in: set up your week
 }
 let lastSync = Date.now();
 window.addEventListener('focus', () => { // pick up your friend's new workouts when you come back to the app
